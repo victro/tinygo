@@ -86,6 +86,14 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 	}
 	defer os.RemoveAll(dir)
 
+	// Determine the path to use for caching the build output.
+	cacheDir := goenv.Get("GOCACHE")
+	if cacheDir == "off" {
+		// Use temporary build directory instead, effectively disabling the
+		// build cache.
+		cacheDir = dir
+	}
+
 	compilerConfig := &compiler.Config{
 		Triple:          config.Triple(),
 		CPU:             config.CPU(),
@@ -131,72 +139,84 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 	// Add jobs to compile each package.
 	// Packages that have a cache hit will not be compiled again.
 	var packageJobs []*compileJob
-	packageBitcodePaths := make(map[string]string)
-	packageActionIDs := make(map[string]string)
+	packageActionIDJobs := make(map[string]*compileJob)
 	optLevel, sizeLevel, _ := config.OptLevels()
 	for _, pkg := range lprogram.Sorted() {
 		pkg := pkg // necessary to avoid a race condition
 
+		// Determine which globals should be left undefined in this package.
 		var undefinedGlobals []string
 		for name := range config.Options.GlobalValues[pkg.Pkg.Path()] {
 			undefinedGlobals = append(undefinedGlobals, name)
 		}
 		sort.Strings(undefinedGlobals)
 
-		// Create a cache key: a hash from the action ID below that contains all
-		// the parameters for the build.
-		actionID := packageAction{
-			ImportPath:       pkg.ImportPath,
-			CompilerVersion:  compiler.Version,
-			InterpVersion:    interp.Version,
-			LLVMVersion:      llvm.Version,
-			Config:           compilerConfig,
-			CFlags:           pkg.CFlags,
-			FileHashes:       make(map[string]string, len(pkg.FileHashes)),
-			Imports:          make(map[string]string, len(pkg.Pkg.Imports())),
-			OptLevel:         optLevel,
-			SizeLevel:        sizeLevel,
-			UndefinedGlobals: undefinedGlobals,
-		}
-		for filePath, hash := range pkg.FileHashes {
-			actionID.FileHashes[filePath] = hex.EncodeToString(hash)
-		}
+		// Create a slice of the action ID jobs for each of the imported
+		// packages.
+		var importedPackages []*compileJob
 		for _, imported := range pkg.Pkg.Imports() {
-			hash, ok := packageActionIDs[imported.Path()]
+			job, ok := packageActionIDJobs[imported.Path()]
 			if !ok {
 				return fmt.Errorf("package %s imports %s but couldn't find dependency", pkg.ImportPath, imported.Path())
 			}
-			actionID.Imports[imported.Path()] = hash
-		}
-		buf, err := json.Marshal(actionID)
-		if err != nil {
-			panic(err) // shouldn't happen
-		}
-		hash := sha512.Sum512_224(buf)
-		packageActionIDs[pkg.ImportPath] = hex.EncodeToString(hash[:])
-
-		// Determine the path of the bitcode file (which is a serialized version
-		// of a LLVM module).
-		cacheDir := goenv.Get("GOCACHE")
-		if cacheDir == "off" {
-			// Use temporary build directory instead, effectively disabling the
-			// build cache.
-			cacheDir = dir
-		}
-		bitcodePath := filepath.Join(cacheDir, "pkg-"+hex.EncodeToString(hash[:])+".bc")
-		packageBitcodePaths[pkg.ImportPath] = bitcodePath
-
-		// Check whether this package has been compiled before, and if so don't
-		// compile it again.
-		if _, err := os.Stat(bitcodePath); err == nil {
-			// Already cached, don't recreate this package.
-			continue
+			importedPackages = append(importedPackages, job)
 		}
 
-		// The package has not yet been compiled, so create a job to do so.
+		// Create a job that will calculate the action ID for a package compile
+		// job. The action ID is the cache key that is used for caching this
+		// package.
+		packageActionIDJob := &compileJob{
+			description:  "calculate cache key for package " + pkg.ImportPath,
+			dependencies: importedPackages,
+			run: func(job *compileJob) error {
+				// Create a cache key: a hash from the action ID below that contains all
+				// the parameters for the build.
+				actionID := packageAction{
+					ImportPath:       pkg.ImportPath,
+					CompilerVersion:  compiler.Version,
+					InterpVersion:    interp.Version,
+					LLVMVersion:      llvm.Version,
+					Config:           compilerConfig,
+					CFlags:           pkg.CFlags,
+					FileHashes:       make(map[string]string, len(pkg.FileHashes)),
+					Imports:          make(map[string]string, len(pkg.Pkg.Imports())),
+					OptLevel:         optLevel,
+					SizeLevel:        sizeLevel,
+					UndefinedGlobals: undefinedGlobals,
+				}
+				for filePath, hash := range pkg.FileHashes {
+					actionID.FileHashes[filePath] = hex.EncodeToString(hash)
+				}
+				for i, imported := range pkg.Pkg.Imports() {
+					actionID.Imports[imported.Path()] = importedPackages[i].result
+				}
+				buf, err := json.Marshal(actionID)
+				if err != nil {
+					panic(err) // shouldn't happen
+				}
+				hash := sha512.Sum512_224(buf)
+				job.result = hex.EncodeToString(hash[:])
+				return nil
+			},
+		}
+		packageActionIDJobs[pkg.Pkg.Path()] = packageActionIDJob
+
+		// Now create the job to actually build the package. It will exit early
+		// if the package is already compiled.
 		job := &compileJob{
-			description: "compile package " + pkg.ImportPath,
-			run: func(*compileJob) error {
+			description:  "compile package " + pkg.ImportPath,
+			dependencies: []*compileJob{packageActionIDJob},
+			run: func(job *compileJob) error {
+				// Determine the path of the output bitcode file.
+				job.result = filepath.Join(cacheDir, "pkg-"+job.dependencies[0].result+".bc")
+
+				// Check whether this package has been compiled before, and if so don't
+				// compile it again.
+				if _, err := os.Stat(job.result); err == nil {
+					// Already cached, don't recreate this package.
+					return nil
+				}
+
 				// Compile AST to IR. The compiler.CompilePackage function will
 				// build the SSA as needed.
 				mod, errs := compiler.CompilePackage(pkg.ImportPath, pkg, program.Package(pkg.Pkg), machine, compilerConfig, config.DumpSSA())
@@ -270,84 +290,12 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 					newGlobal.SetName(name)
 				}
 
-				// Try to interpret package initializers at compile time.
-				// It may only be possible to do this partially, in which case
-				// it is completed after all IR files are linked.
-				pkgInit := mod.NamedFunction(pkg.Pkg.Path() + ".init")
-				if pkgInit.IsNil() {
-					panic("init not found for " + pkg.Pkg.Path())
-				}
-				err := interp.RunFunc(pkgInit, config.DumpSSA())
+				err := optimizePackage(mod, pkg, config)
 				if err != nil {
 					return err
 				}
-				if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
-					return errors.New("verification error after interpreting " + pkgInit.Name())
-				}
 
-				if sizeLevel >= 2 {
-					// Set the "optsize" attribute to make slightly smaller
-					// binaries at the cost of some performance.
-					kind := llvm.AttributeKindID("optsize")
-					attr := mod.Context().CreateEnumAttribute(kind, 0)
-					for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-						fn.AddFunctionAttr(attr)
-					}
-				}
-
-				// Run function passes for each function in the module.
-				// These passes are intended to be run on each function right
-				// after they're created to reduce IR size (and maybe also for
-				// cache locality to improve performance), but for now they're
-				// run here for each function in turn. Maybe this can be
-				// improved in the future.
-				builder := llvm.NewPassManagerBuilder()
-				defer builder.Dispose()
-				builder.SetOptLevel(optLevel)
-				builder.SetSizeLevel(sizeLevel)
-				funcPasses := llvm.NewFunctionPassManagerForModule(mod)
-				defer funcPasses.Dispose()
-				builder.PopulateFunc(funcPasses)
-				funcPasses.InitializeFunc()
-				for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
-					if fn.IsDeclaration() {
-						continue
-					}
-					funcPasses.RunFunc(fn)
-				}
-				funcPasses.FinalizeFunc()
-
-				// Serialize the LLVM module as a bitcode file.
-				// Write to a temporary path that is renamed to the destination
-				// file to avoid race conditions with other TinyGo invocatiosn
-				// that might also be compiling this package at the same time.
-				f, err := ioutil.TempFile(filepath.Dir(bitcodePath), filepath.Base(bitcodePath))
-				if err != nil {
-					return err
-				}
-				if runtime.GOOS == "windows" {
-					// Work around a problem on Windows.
-					// For some reason, WriteBitcodeToFile causes TinyGo to
-					// exit with the following message:
-					//   LLVM ERROR: IO failure on output stream: Bad file descriptor
-					buf := llvm.WriteBitcodeToMemoryBuffer(mod)
-					defer buf.Dispose()
-					_, err = f.Write(buf.Bytes())
-				} else {
-					// Otherwise, write bitcode directly to the file (probably
-					// faster).
-					err = llvm.WriteBitcodeToFile(mod, f)
-				}
-				if err != nil {
-					// WriteBitcodeToFile doesn't produce a useful error on its
-					// own, so create a somewhat useful error message here.
-					return fmt.Errorf("failed to write bitcode for package %s to file %s", pkg.ImportPath, bitcodePath)
-				}
-				err = f.Close()
-				if err != nil {
-					return err
-				}
-				return os.Rename(f.Name(), bitcodePath)
+				return writeBitcode(mod, job.result)
 			},
 		}
 		packageJobs = append(packageJobs, job)
@@ -359,13 +307,13 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 	programJob := &compileJob{
 		description:  "link+optimize packages (LTO)",
 		dependencies: packageJobs,
-		run: func(*compileJob) error {
+		run: func(job *compileJob) error {
 			// Load and link all the bitcode files. This does not yet optimize
 			// anything, it only links the bitcode files together.
 			ctx := llvm.NewContext()
 			mod = ctx.NewModule("")
-			for _, pkg := range lprogram.Sorted() {
-				pkgMod, err := ctx.ParseBitcodeFile(packageBitcodePaths[pkg.ImportPath])
+			for _, pkgJob := range packageJobs {
+				pkgMod, err := ctx.ParseBitcodeFile(pkgJob.result)
 				if err != nil {
 					return fmt.Errorf("failed to load bitcode file: %w", err)
 				}
@@ -733,6 +681,98 @@ func Build(pkgName, outpath string, config *compileopts.Config, action func(Buil
 		MainDir:    lprogram.MainPkg().Dir,
 		ImportPath: lprogram.MainPkg().ImportPath,
 	})
+}
+
+// optimizePackage runs various package level optimizations. It assumes the
+// module is not yet optimized.
+func optimizePackage(mod llvm.Module, pkg *loader.Package, config *compileopts.Config) error {
+	optLevel, sizeLevel, _ := config.OptLevels()
+
+	// Try to interpret package initializers at compile time.
+	// It may only be possible to do this partially, in which case
+	// it is completed after all IR files are linked.
+	pkgInit := mod.NamedFunction(pkg.Pkg.Path() + ".init")
+	if pkgInit.IsNil() {
+		panic("init not found for " + pkg.Pkg.Path())
+	}
+	err := interp.RunFunc(pkgInit, config.DumpSSA())
+	if err != nil {
+		return err
+	}
+	if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
+		return errors.New("verification error after interpreting " + pkgInit.Name())
+	}
+
+	if sizeLevel >= 2 {
+		// Set the "optsize" attribute to make slightly smaller
+		// binaries at the cost of some performance.
+		kind := llvm.AttributeKindID("optsize")
+		attr := mod.Context().CreateEnumAttribute(kind, 0)
+		for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+			fn.AddFunctionAttr(attr)
+		}
+	}
+
+	// Run function passes for each function in the module.
+	// These passes are intended to be run on each function right
+	// after they're created to reduce IR size (and maybe also for
+	// cache locality to improve performance), but for now they're
+	// run here for each function in turn. Maybe this can be
+	// improved in the future.
+	builder := llvm.NewPassManagerBuilder()
+	defer builder.Dispose()
+	builder.SetOptLevel(optLevel)
+	builder.SetSizeLevel(sizeLevel)
+	funcPasses := llvm.NewFunctionPassManagerForModule(mod)
+	defer funcPasses.Dispose()
+	builder.PopulateFunc(funcPasses)
+	funcPasses.InitializeFunc()
+	for fn := mod.FirstFunction(); !fn.IsNil(); fn = llvm.NextFunction(fn) {
+		if fn.IsDeclaration() {
+			continue
+		}
+		funcPasses.RunFunc(fn)
+	}
+	funcPasses.FinalizeFunc()
+
+	return nil
+}
+
+// writeBitcode writes the bitcode in the module to the given path. This bitcode
+// writing is atomic: it will first be written to a temporary path which is then
+// renamed to the target path.
+func writeBitcode(mod llvm.Module, path string) error {
+	// Serialize the LLVM module as a bitcode file.
+	// Write to a temporary path that is renamed to the destination
+	// file to avoid race conditions with other TinyGo invocatiosn
+	// that might also be compiling this package at the same time.
+	f, err := ioutil.TempFile(filepath.Dir(path), filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		// Work around a problem on Windows.
+		// For some reason, WriteBitcodeToFile causes TinyGo to
+		// exit with the following message:
+		//   LLVM ERROR: IO failure on output stream: Bad file descriptor
+		buf := llvm.WriteBitcodeToMemoryBuffer(mod)
+		defer buf.Dispose()
+		_, err = f.Write(buf.Bytes())
+	} else {
+		// Otherwise, write bitcode directly to the file (probably
+		// faster).
+		err = llvm.WriteBitcodeToFile(mod, f)
+	}
+	if err != nil {
+		// WriteBitcodeToFile doesn't produce a useful error on its
+		// own, so create a somewhat useful error message here.
+		return fmt.Errorf("failed to write LLVM bitcode to file %s", path)
+	}
+	err = f.Close()
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // optimizeProgram runs a series of optimizations and transformations that are
