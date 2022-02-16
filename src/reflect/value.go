@@ -132,7 +132,7 @@ func (v Value) IsNil() bool {
 		_, val := decomposeInterface(*(*interface{})(v.value))
 		return val == nil
 	default:
-		panic(&ValueError{"IsNil"})
+		panic(&ValueError{Method: "IsNil"})
 	}
 }
 
@@ -148,7 +148,7 @@ func (v Value) Pointer() uintptr {
 	case Func:
 		panic("unimplemented: (reflect.Value).Pointer()")
 	default: // not implemented: Func
-		panic(&ValueError{"Pointer"})
+		panic(&ValueError{Method: "Pointer"})
 	}
 }
 
@@ -191,7 +191,7 @@ func (v Value) Bool() bool {
 			return uintptr(v.value) != 0
 		}
 	default:
-		panic(&ValueError{"Bool"})
+		panic(&ValueError{Method: "Bool"})
 	}
 }
 
@@ -228,7 +228,7 @@ func (v Value) Int() int64 {
 			return int64(int64(uintptr(v.value)))
 		}
 	default:
-		panic(&ValueError{"Int"})
+		panic(&ValueError{Method: "Int"})
 	}
 }
 
@@ -271,7 +271,7 @@ func (v Value) Uint() uint64 {
 			return uint64(uintptr(v.value))
 		}
 	default:
-		panic(&ValueError{"Uint"})
+		panic(&ValueError{Method: "Uint"})
 	}
 }
 
@@ -297,7 +297,7 @@ func (v Value) Float() float64 {
 			return *(*float64)(unsafe.Pointer(&v.value))
 		}
 	default:
-		panic(&ValueError{"Float"})
+		panic(&ValueError{Method: "Float"})
 	}
 }
 
@@ -319,7 +319,7 @@ func (v Value) Complex() complex128 {
 		// architectures with 128-bit pointers, however.
 		return *(*complex128)(v.value)
 	default:
-		panic(&ValueError{"Complex"})
+		panic(&ValueError{Method: "Complex"})
 	}
 }
 
@@ -364,7 +364,7 @@ func (v Value) Len() int {
 	case String:
 		return int((*stringHeader)(v.value).len)
 	default:
-		panic(&ValueError{"Len"})
+		panic(&ValueError{Method: "Len"})
 	}
 }
 
@@ -382,7 +382,7 @@ func (v Value) Cap() int {
 	case Slice:
 		return int((*sliceHeader)(v.value).cap)
 	default:
-		panic(&ValueError{"Cap"})
+		panic(&ValueError{Method: "Cap"})
 	}
 }
 
@@ -412,7 +412,7 @@ func (v Value) Elem() Value {
 			flags:    v.flags &^ valueFlagIndirect,
 		}
 	default:
-		panic(&ValueError{"Elem"})
+		panic(&ValueError{Method: "Elem"})
 	}
 }
 
@@ -556,7 +556,7 @@ func (v Value) Index(i int) Value {
 			value:    unsafe.Pointer(value),
 		}
 	default:
-		panic(&ValueError{"Index"})
+		panic(&ValueError{Method: "Index"})
 	}
 }
 
@@ -635,7 +635,7 @@ func (v Value) SetBool(x bool) {
 	case Bool:
 		*(*bool)(v.value) = x
 	default:
-		panic(&ValueError{"SetBool"})
+		panic(&ValueError{Method: "SetBool"})
 	}
 }
 
@@ -653,7 +653,7 @@ func (v Value) SetInt(x int64) {
 	case Int64:
 		*(*int64)(v.value) = x
 	default:
-		panic(&ValueError{"SetInt"})
+		panic(&ValueError{Method: "SetInt"})
 	}
 }
 
@@ -673,7 +673,7 @@ func (v Value) SetUint(x uint64) {
 	case Uintptr:
 		*(*uintptr)(v.value) = uintptr(x)
 	default:
-		panic(&ValueError{"SetUint"})
+		panic(&ValueError{Method: "SetUint"})
 	}
 }
 
@@ -685,7 +685,7 @@ func (v Value) SetFloat(x float64) {
 	case Float64:
 		*(*float64)(v.value) = x
 	default:
-		panic(&ValueError{"SetFloat"})
+		panic(&ValueError{Method: "SetFloat"})
 	}
 }
 
@@ -697,7 +697,7 @@ func (v Value) SetComplex(x complex128) {
 	case Complex128:
 		*(*complex128)(v.value) = x
 	default:
-		panic(&ValueError{"SetComplex"})
+		panic(&ValueError{Method: "SetComplex"})
 	}
 }
 
@@ -707,7 +707,7 @@ func (v Value) SetString(x string) {
 	case String:
 		*(*string)(v.value) = x
 	default:
-		panic(&ValueError{"SetString"})
+		panic(&ValueError{Method: "SetString"})
 	}
 }
 
