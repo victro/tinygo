@@ -35,6 +35,10 @@ func (v Value) isExported() bool {
 	return v.flags&valueFlagExported != 0
 }
 
+func MakeMapWithSize(typ Type, n int) Value {
+	panic("unimplemented: reflect.MakeMapWithSize()")
+}
+
 func Indirect(v Value) Value {
 	if v.Kind() != Ptr {
 		return v
@@ -788,10 +792,11 @@ type stringHeader struct {
 
 type ValueError struct {
 	Method string
+	Kind   Kind
 }
 
 func (e *ValueError) Error() string {
-	return "reflect: call of reflect.Value." + e.Method + " on invalid type"
+	panic("unimplemented method: (reflect.Value).Error()")
 }
 
 // Calls to this function are converted to LLVM intrinsic calls such as
@@ -864,4 +869,25 @@ func MakeMap(typ Type) Value {
 
 func (v Value) Call(in []Value) []Value {
 	panic("unimplemented: (reflect.Value).Call()")
+}
+
+func (v Value) MethodByName(name string) Value {
+	panic("unimplemented: (reflect.Value).MethodByName()")
+}
+
+func NewAt(typ Type, p unsafe.Pointer) Value {
+	panic("unimplemented: reflect.New()")
+}
+
+// Recv receives and returns a value from the channel v.
+// It panics if v's Kind is not Chan.
+// The receive blocks until a value is ready.
+// The boolean value ok is true if the value x corresponds to a send
+// on the channel, false if it is a zero value received because the channel is closed.
+func (v Value) Recv() (x Value, ok bool) {
+	panic("unimplemented: reflect.Recv()")
+}
+
+func (v Value) Slice3(i, j, k int) Value {
+	panic("unimplemented: reflect.Slice3()")
 }
